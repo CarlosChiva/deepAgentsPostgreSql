@@ -1,11 +1,9 @@
 # Docker Compose configuration for the deepagent-postgres project.
-# Defines the PostgreSQL database service and the Chat API service,
+# Defines the PostgreSQL database service, Ollama (LLM) service, and the Chat API service,
 # connected via a shared network with persistent data storage.
 
 services:
-  # ─────────────────────────────────────────────────────
   # PostgreSQL database
-  # ─────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: always
@@ -14,8 +12,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
-      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      POSTGRES_DB: chatdb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -23,28 +20,15 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
-    networks:
-      - app-network
+  
 
-  # # Local LLM via Ollama (ChatOllama provider)
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ollama_data:/root/.ollama
-  #   networks:
-  #     - app-network
-
-  # ─────────────────────────────────────────────────────
   # Chat API application
-  # ─────────────────────────────────────────────────────
   chat-api:
     build:
       context: ./services/chat-api
       dockerfile: Dockerfile
     # ports:
-    #   - "8100:8100"
+    #   - "8000:8000"
     network_mode: "host"
     depends_on:
       postgres:
@@ -52,17 +36,7 @@ services:
 
 
 
-# ─────────────────────────────────────────────────────
-# Shared network for inter-service communication
-# ─────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────
-# Named volume for PostgreSQL data persistence
-# ─────────────────────────────────────────────────────
+# Named volumes for data persistence
 volumes:
   pgdata:
   ollama_data:
-
-networks:
-  app-network:
-    driver: bridge

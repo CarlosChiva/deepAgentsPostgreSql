@@ -15,18 +15,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agent import get_agent
-from app.database import close_checkpointer, close_store, set_shutting_down, setup_checkpointer
+from app.config import settings
+from app.database import (
+    close_checkpointer,
+    close_store,
+    ensure_db_exists,
+    set_shutting_down,
+    get_checkpointer,
+    
+)
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------ #
+# -------------- -------------- -------------- -------------- -------------- #
 # Module-level flag set at the end of startup so ``/ready`` can read it.
-# ------------------------------------------------------------------ #
+# -------------- -------------- -------------- -------------- -------------- #
 _startup_complete: bool = False
 _startup_failed: bool = False
 
 
-# ------ lifespan ------ ------ ------ ------ ------ ------ ------ ------
+# ------ lifespan ------ ------ ------ ------ ------ ------ ------ ------ ->
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,20 +47,27 @@ async def lifespan(app: FastAPI):
     flag causes all subsequent requests to receive a 503.
     """
 
-    # ---- startup phase ------ ------ ------ ------ ------ ------ ------ ----
+    # ---- startup phase ------ ------ ------ ------ ------ ------ ------ ->
 
     global _startup_complete, _startup_failed
     logger.info("Starting up DeepAgents Chat API …")
 
+    # Ensure the target database exists before attempting table setup
     try:
-        setup_checkpointer()
+        await ensure_db_exists(settings.postgres_url)
+    except Exception as exc:
+        logger.warning("ensure_db_exists failed (best effort): %s", exc)
+        # Proceed anyway — downstream code will surface the real error
+
+    try:
+        await get_checkpointer()
         logger.info("PostgreSQL checkpointer initialised")
     except Exception as exc:
         logger.error("Failed to set up checkpointer during startup: %s", exc)
         _startup_failed = True
 
     try:
-        get_agent()
+        await get_agent()
         logger.info("DeepAgent instance initialised")
     except Exception as exc:
         logger.error("Failed to initialise agent during startup: %s", exc)
@@ -62,12 +77,15 @@ async def lifespan(app: FastAPI):
         _startup_complete = True
         logger.info("Application startup complete")
     else:
-        logger.error("Application startup completed with errors — some features unavailable")
+        logger.error(
+            "Application startup completed with errors"
+            " — some features unavailable"
+        )
 
     # Yield -- app is now serving requests
     yield
 
-    # ---- shutdown phase ------ ------ ------ ------ ------ ------ ----------
+    # ---- shutdown phase ------ ------ ------ ------ ------ ------ ----
 
     _startup_complete = False
     logger.info("Shutdown starting …")
@@ -75,12 +93,12 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown flag set -- no new requests accepted")
 
     await close_store()
-    close_checkpointer()
+    await close_checkpointer()
 
     logger.info("Shutdown complete")
 
 
-# ------ application factory ------ ------ ------ ------ ------ ------ ------
+# ------ application factory ------ ------ ------ ------ ------ ------ ------>
 
 app = FastAPI(
     title="DeepAgents Chat API",
@@ -90,7 +108,7 @@ app = FastAPI(
 )
 
 
-# ------ CORS middleware ------ ------ ------ ------ ------ ------ ------
+# ------ CORS middleware ------ ------ ------ ------ ------ ------ ------ ->
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,11 +119,15 @@ app.add_middleware(
 )
 
 
-# ------ request logging middleware ------ ------ ------ ------ ------ ------
+# ------ request logging middleware ------ ------ ------ ------ ------ ->
+
 
 @app.middleware("http")
 async def log_requests_time(request: Request, call_next):
-    """Log every request's method, path, status code, and duration."""
+    """Log every request's method, path, status code, and duration."
+
+    Middleware runs *before* the request handler and *after* the response.
+    """
 
     timer = time.perf_counter()
 
@@ -128,12 +150,15 @@ async def log_requests_time(request: Request, call_next):
     return response
 
 
-# ------ shutdown-reject middleware ------ ------ ------ ------ ------ ------
+# ------ shutdown-reject middleware ------ ------ ------ ------ ------ ->
+
 
 @app.middleware("http")
 async def reject_shutdown_requests(request: Request, call_next):
-    """Return 503 when the app is in the shutdown phase."""
+    """Return 503 when the app is in the shutdown phase."
 
+    Any request arriving after ``set_shutting_down(True)`` is rejected.
+    """
     from app.database import is_shutting_down  # noqa: E402 -- local import
 
     if is_shutting_down():
@@ -147,34 +172,45 @@ async def reject_shutdown_requests(request: Request, call_next):
     return await call_next(request)
 
 
-# ------ routers ------ ------ ------ ------ ------ ------ ------ ------ -------
+# ------ routers ------ ------ ------ ------ ------ ------ ------ ------ ---
+# noqa: E402 — imported after app creation
 
 from app.routers.chat import router as chat_router  # noqa: E402
 
 app.include_router(chat_router, prefix="/api/v1")
 
 
-# ------ /health endpoint ------ ------ ------ ------ ------ ------ ------ ----
+# ------ /health endpoint ------ ------ ------ ------ ------ ------ ->
+
 
 from app.health import check_health  # noqa: E402
 
 
 @app.get("/health", tags=["utils"])
 async def health() -> JSONResponse:
-    """Extended health-check: postgres, checkpointer, agent."""
+    """Extended health-check: postgres, checkpointer, agent."
+
+    Returns ``status=200`` when all subsystems are healthy,
+    ``status=503`` when one or more subsystems are degraded.
+    """
     health_status = check_health()
     status_code = 503 if health_status.get("status") == "degraded" else 200
     return JSONResponse(content=health_status, status_code=status_code)
 
 
-# ------ /ready endpoint ------ ------ ------ ------ ------ ------ ------ ----
+# ------ /ready endpoint ------ ------ ------ ------ ------ ------ ->
+
 
 @app.get("/ready", tags=["utils"])
 async def ready() -> JSONResponse:
-    """Readiness probe — True once startup phase has completed."""
+    """Readiness probe — ``True`` once startup phase has completed."
+
+    Typically used by K8s ``startupProbe`` / ``readinessProbe`.
+    """
     if not _startup_complete or _startup_failed:
         return JSONResponse(
-            {"ready": False, "reason": "startup incomplete"}, status_code=503
+            {"ready": False, "reason": "startup incomplete"},
+            status_code=503,
         )
     return JSONResponse({"ready": True}, status_code=200)
 

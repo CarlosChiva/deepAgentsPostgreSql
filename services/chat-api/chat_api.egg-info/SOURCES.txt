@@ -18,4 +18,6 @@ chat_api.egg-info/dependency_links.txt
 chat_api.egg-info/entry_points.txt
 chat_api.egg-info/requires.txt
 chat_api.egg-info/top_level.txt
+tests/test_agent.py
 tests/test_chat.py
+tests/test_chat_service.py

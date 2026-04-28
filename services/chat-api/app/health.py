@@ -26,7 +26,7 @@ def check_postgres() -> str:
     """
     conn = None
     try:
-        conn = connect(settings.postgres_url, timeout=3)
+        conn = connect(settings.postgres_url)
         status = conn.info.status
         return "ok" if status == ConnStatus.IDLE else "error"
     except Exception as exc:
@@ -44,13 +44,17 @@ def check_checkpointer() -> str:
     """Verify the checkpointer can be obtained and its connection is idle."""
     try:
         # Lazy import to avoid circular dependencies at module load time.
-        from app.database import get_checkpointer, _checkpointer_initialized
+        from app.database import _checkpointer, _checkpointer_initialized
 
         if not _checkpointer_initialized:
             return "error"
 
-        chk = get_checkpointer()
-        conn = chk.get_conn()
+        # _checkpointer is the already-initialized global (set during startup).
+        if _checkpointer is None:
+            return "error"
+
+        # PostgresSaver exposes ``.conn`` (not ``get_conn()``).
+        conn = _checkpointer.conn
         return "ok" if conn.info.status == ConnStatus.IDLE else "error"
     except Exception as exc:
         logger.warning("Checkpointer probe failed: %s", exc)
@@ -60,14 +64,17 @@ def check_checkpointer() -> str:
 def check_agent() -> str:
     """Verify the DeepAgent singleton can be retrieved.
 
-    ``get_agent()`` raises ``ValueError`` when no LLM provider is configured;
-    we catch that here and return ``"error"``.
+    Uses the module-level ``_agent`` global directly to avoid the
+    ``RuntimeError: asyncio.run() cannot be called from a running event loop``
+    that would occur when calling ``get_agent()`` (a coroutine) during a
+    synchronous health check inside FastAPI.
     """
     try:
         # Lazy import to avoid circular dependencies at module load time.
-        from app.agent import get_agent
+        from app.agent import _agent  # noqa: E402
 
-        get_agent()
+        if _agent is None:
+            return "error"
         return "ok"
     except Exception as exc:
         logger.warning("Agent probe failed: %s", exc)

@@ -21,7 +21,6 @@ COPY --from=builder /app/.venv /app/.venv
 
 COPY app/ app/
 
-USER python
 
 EXPOSE 8100
 

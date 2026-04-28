@@ -18,13 +18,14 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient, TestClient
 from langgraph.checkpoint.postgres import PostgresSaver
-from langgraph.store.async_postgres import AsyncPostgresStore
+from langgraph.store.postgres import AsyncPostgresStore
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -99,6 +100,21 @@ def test_db_uri(test_settings) -> str:
 
 # ── checkpointer ─────────────────────────────────────────────────────────────────
 
+def _async_test_checkpointer(db_uri: str):  # noqa: ANN201
+    """Helper to create a synchronous ``PostgresSaver`` from a connection URI.
+
+    ``PostgresSaver.from_conn_string()`` returns a **synchronous** context manager,
+    so we call ``__enter__`` / ``__exit__`` directly - never with ``await``.
+
+    The caller is responsible for tearing down the returned context manager
+    after the test completes.
+    """
+    cm = PostgresSaver.from_conn_string(db_uri)
+    saver = cm.__enter__()
+    saver.setup()  # also synchronous
+    return saver, cm
+
+
 @pytest.fixture(scope="function")
 def test_checkpointer(test_settings, test_db_uri) -> Generator[PostgresSaver, None, None]:
     """Provide a fresh ``PostgresSaver`` for each test function.
@@ -109,55 +125,54 @@ def test_checkpointer(test_settings, test_db_uri) -> Generator[PostgresSaver, No
     """
     _reset_db_module_singletons()
 
-    saver = PostgresSaver.from_conn_string(test_db_uri)
-    saver.setup()
-
+    saver, _ = _async_test_checkpointer(test_db_uri)
     yield saver
 
-    # Teardown
-    try:
-        pool = getattr(saver, "_pool", None)
-        if pool is not None:
-            pool.close()
-            pool.dispose()
-    except Exception:
-        pass
+
+# ── store ─────────────────────────────────────────────────────────────────
 
 
-# ── store ─────────────────────────────────────────────────────────────────────────
+def _async_test_store(db_uri: str):  # noqa: ANN201
+    """Helper to create an ``AsyncPostgresStore`` from a connection URI.
+
+    ``AsyncPostgresStore.from_conn_string()`` returns an **async** context
+    manager, so we call ``__aenter__`` / ``__aexit__`` with the event loop.
+    """
+    cm = AsyncPostgresStore.from_conn_string(db_uri)
+    store = asyncio.get_event_loop().run_until_complete(cm.__aenter__())
+    asyncio.get_event_loop().run_until_complete(store.setup())
+    return store, cm
+
 
 @pytest.fixture(scope="function")
-async def test_store(test_settings, test_db_uri) -> AsyncGenerator[AsyncPostgresStore, None]:
+def test_store(test_settings, test_db_uri) -> Generator[AsyncPostgresStore, None, None]:
     """Provide a fresh ``AsyncPostgresStore`` for each test function.
 
-    Teardown closes the connection pool asynchronously.
+    The store is set up (tables created) automatically.  On teardown
+    the connection pool is closed gracefully; errors from double-close are
+    silently ignored.
     """
     _reset_db_module_singletons()
 
-    store = AsyncPostgresStore.from_conn_string(test_db_uri)
-    await store.setup()
-
+    store, cm = _async_test_store(test_db_uri)
     yield store
 
     # Teardown
     try:
-        pool = getattr(store, "_pool", None)
-        if pool is not None:
-            await pool.close()
-            await pool.dispose()
+        asyncio.get_event_loop().run_until_complete(cm.__aexit__(None, None, None))
     except Exception:
         pass
 
 
 # ── helper: inject checkpointer / store into ``app.database`` module ────────────
 
-def _inject_into_database_module(test_checkpointer, test_store_obj):
+def _inject_into_database_module(test_checkpointer, test_store):
     """Mutate ``app.database`` so its singleton getters return our test objects."""
     from app import database as db_mod  # noqa: E402
 
     db_mod._checkpointer = test_checkpointer
     db_mod._checkpointer_initialized = True
-    db_mod._store = test_store_obj
+    db_mod._store = test_store
     db_mod._store_initialized = True
 
 
