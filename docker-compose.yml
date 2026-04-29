@@ -11,7 +11,7 @@ services:
       - "5440:5432"
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: devpass
       POSTGRES_DB: chatdb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -20,6 +20,7 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+
   
 
   # Chat API application

@@ -28,6 +28,10 @@ class ChatHistoryResponse(BaseModel):
         description="The thread identifier",
         examples=["conv-xyz789"],
     )
+    user_id: str = Field(
+        description="The user ID associated with this conversation history",
+        examples=["user-abc123"],
+    )
     messages: list[MessageItem] = Field(
         description="Ordered list of messages in the conversation",
         examples=[[{"role": "user", "content": "Hello", "timestamp": "2024-01-15T12:00:00Z"}]],

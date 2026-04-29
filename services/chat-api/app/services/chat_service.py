@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
 from sse_starlette import EventSourceResponse
 
-from app.agent import get_agent
-from app.database import get_checkpointer
+from app.agent import get_agent_for_user
+from app.config import Settings
 from app.models.chat import ChatResponse
 from app.models.history import ChatHistoryResponse, MessageItem
 
@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 async def send_message(
+    user_id: str,
     message: str,
     thread_id: str,
     stream: bool = False,
+    settings: Settings | None = None,
 ) -> ChatResponse | EventSourceResponse:
     """Send a user message to the chat agent and return its reply."""
 
@@ -30,16 +32,20 @@ async def send_message(
     if not thread_id or not thread_id.strip():
         raise HTTPException(status_code=400, detail="Thread ID is required")
 
+    if not user_id and settings is not None and settings.TENANT_ENFORCE_USER_ID:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
     try:
-        agent = await get_agent()
-        await get_checkpointer()  # valida que la DB esté disponible
+        agent = await get_agent_for_user(user_id)
     except Exception as e:
-        logger.error("Failed to obtain agent or checkpointer: %s", e)
-        raise HTTPException(status_code=503, detail="Database unavailable") from e
+        logger.error("Failed to obtain agent: %s", e)
+        raise HTTPException(status_code=503, detail="Service unavailable") from e
 
     config = {"configurable": {"thread_id": thread_id}}
 
     if stream:
+        uid = user_id
+
         async def _event_generator():
             async for _stream_data in agent.astream(
                 {"messages": [{"role": "user", "content": message}]},
@@ -50,10 +56,13 @@ async def send_message(
                     msgs = _stream_data.get("messages", [])
                     for _msg in msgs:
                         if isinstance(_msg, dict) and isinstance(_msg.get("content"), str):
-                            yield {"event": "message", "data": json.dumps({"chunk": _msg["content"]})}
+                            data = json.dumps({"chunk": _msg["content"], "user_id": uid})
+                            yield {"event": "message", "data": data}
                         elif hasattr(_msg, "content") and isinstance(_msg.content, str):
-                            yield {"event": "message", "data": json.dumps({"chunk": _msg.content})}
-            yield {"event": "message", "data": json.dumps({"done": True})}
+                            data = json.dumps({"chunk": _msg.content, "user_id": uid})
+                            yield {"event": "message", "data": data}
+            data = json.dumps({"done": True, "user_id": uid})
+            yield {"event": "message", "data": data}
 
         def _error_handler(exc):
             logger.error("SSE streaming error: %s", exc)
@@ -74,9 +83,10 @@ async def send_message(
         reply = "(empty response)"
 
     return ChatResponse(
+        user_id=user_id,
         thread_id=thread_id,
         message=reply,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -97,28 +107,36 @@ def _extract_reply(result: Any) -> str | None:
                 # Objetos LangChain (AIMessage) usan .type == "ai", no .role
                 msg_type = getattr(msg, "type", None)
                 content = getattr(msg, "content", None)
-                if msg_type == "ai" and content:          # ← CORREGIDO: "ai" no "assistant"
+                if msg_type == "ai" and content:
                     return str(content).strip() or None
 
     return str(result).strip() or None
 
 
-async def get_history(thread_id: str) -> ChatHistoryResponse:
+async def get_history(
+    user_id: str,
+    thread_id: str,
+) -> ChatHistoryResponse:
     """Return the full message history for *thread_id*."""
 
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
     if not thread_id or not thread_id.strip():
         raise HTTPException(status_code=400, detail="Thread ID is required")
 
     try:
-        checkpointer = await get_checkpointer()
+        agent = await get_agent_for_user(user_id)
     except Exception as e:
-        logger.error("Failed to obtain checkpointer: %s", e)
+        logger.error("Failed to obtain agent: %s", e)
         raise HTTPException(status_code=503, detail="Service unavailable") from e
+
+    # The agent encapsulates the tenant-specific checkpointer
+    checkpointer = agent.checkpointer
 
     config = {"configurable": {"thread_id": thread_id}}
 
     try:
-        # ✅ CORREGIDO: aget() devuelve el checkpoint más reciente (es async)
+        # Aget devuelve el checkpoint más reciente (es async)
         # No usar get_state_history() — no existe en AsyncPostgresSaver
         checkpoint = await checkpointer.aget(config)
     except Exception as e:
@@ -129,6 +147,7 @@ async def get_history(thread_id: str) -> ChatHistoryResponse:
     if checkpoint is None:
         return ChatHistoryResponse(
             thread_id=thread_id,
+            user_id=user_id,
             messages=[],
             message_count=0,
         )
@@ -157,12 +176,13 @@ async def get_history(thread_id: str) -> ChatHistoryResponse:
             MessageItem(
                 role=role,
                 content=content,
-                timestamp=datetime.now(timezone.utc),  # checkpoint no tiene ts por mensaje
+                timestamp=datetime.now(UTC),
             )
         )
 
     return ChatHistoryResponse(
         thread_id=thread_id,
+        user_id=user_id,
         messages=message_items,
         message_count=len(message_items),
     )

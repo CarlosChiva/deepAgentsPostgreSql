@@ -10,6 +10,8 @@ Provides:
       database (function-scoped, auto-teardown).
     - ``test_store`` – a fresh ``AsyncPostgresStore`` backed by the test
       database (function-scoped, auto-teardown).
+    - ``tenant_manager`` – a fresh ``TenantManager`` with ``reset_tenant_manager()``.
+    - ``tenant_settings`` – tenant-aware test settings overrides.
     - ``client`` – an ``httpx.TestClient`` that overrides the app's
       dependency injection so every request uses the test checkpointer / store.
     - ``test_agent`` – a mock ``DeepAgent`` wired to the test checkpointer
@@ -339,3 +341,58 @@ def test_agent(monkeypatch) -> MagicMock:
     _reset_agent_singleton()
 
     return mock_agent
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tenant-aware fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _override_tenant_settings(monkeypatch):  # noqa: ANN201
+    """Override tenant-related settings for tests."""
+    tenant_env: dict[str, str | int | bool] = {
+        "TENANT_PREFIX": "deepagent_",
+        "TENANT_SUPERUSER_DB": "postgres",
+        "TENANT_DEFAULT_TTL_SECONDS": "3600",
+        "TENANT_ENFORCE_USER_ID": "true",
+        "TENANT_MAX_CACHE_SIZE": "1000",
+    }
+    for key, value in tenant_env.items():
+        monkeypatch.setenv(key, str(value))
+
+
+@pytest.fixture(scope="function")
+def test_tenant_settings(monkeypatch) -> None:
+    """Override tenant settings via environment variables.
+
+    This fixture does not return a value -- it mutates the environment so that
+    any subsequent imports of ``app.config.settings`` see the test values.
+    """
+    _override_settings(monkeypatch)
+    _override_tenant_settings(monkeypatch)
+
+
+@pytest.fixture(scope="function")
+async def tenant_manager(test_settings) -> "TenantManager":
+    """Provide a fresh TenantManager for each test function.
+
+    Yields the manager instance; on teardown calls ``reset_tenant_manager()``
+    and clears the singleton.
+    """
+    from app.tenant_manager import TenantManager, reset_tenant_manager  # noqa: E402
+
+    manager = TenantManager(ttl_seconds=3600, max_cache_size=100)
+    yield manager
+
+    # Teardown
+    await reset_tenant_manager()
+
+
+@pytest.fixture(scope="function")
+async def reset_tenant_manager_fixture(tenant_manager) -> None:
+    """Fixture that provides a callable to reset the tenant manager singleton.
+
+    Useful for tests that need to manually reset between sub-scenarios.
+    """
+    from app.tenant_manager import reset_tenant_manager  # noqa: E402
+    yield reset_tenant_manager

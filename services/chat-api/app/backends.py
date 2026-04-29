@@ -1,7 +1,7 @@
-"""PostgreSQL filesystem backend for DeepAgents via deepagents-backends.
+"""Tenant-aware PostgreSQL backend helpers for DeepAgents via deepagents-backends.
 
-Provides a singleton PostgresBackend that stores file content in PostgreSQL,
-integrated with the application's lifecycle via initialise() / close().
+Each tenant (user_id) gets its own PostgresConfig pointing to the tenant's
+own database. No singleton state — every function is pure and stateless.
 """
 
 from __future__ import annotations
@@ -9,91 +9,74 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from deepagents_backends import PostgresBackend, PostgresConfig
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Singleton state
-_backend: Optional[PostgresBackend] = None
-_initialized: bool = False
+
+# ─── Configuration ───
 
 
-# ---------- helpers ----------
+def build_tenant_backend_config(user_id: str, tenant_settings=None) -> PostgresConfig:
+    """Build a PostgresConfig pointing to a tenant's database.
 
+    Args:
+        user_id: The tenant's user ID
+        tenant_settings: Optional settings override (defaults to module-level settings)
 
-def _build_config() -> PostgresConfig:
-    """Build a PostgresConfig from application settings."""
+    Returns:
+        PostgresConfig with the tenant database name
+    """
+    if tenant_settings is None:
+        from app.config import settings
+        tenant_settings = settings
+
+    from deepagents_backends import PostgresConfig  # noqa: PLC0415
+
     return PostgresConfig(
-        host=settings.POSTGRES_HOST,
-        port=settings.POSTGRES_PORT,
-        database=settings.POSTGRES_DB,
-        user=settings.POSTGRES_USER,
-        password=settings.POSTGRES_PASSWORD,
+        host=tenant_settings.POSTGRES_HOST,
+        port=tenant_settings.POSTGRES_PORT,
+        database=f"{tenant_settings.TENANT_PREFIX}{user_id}",
+        user=tenant_settings.POSTGRES_USER,
+        password=tenant_settings.POSTGRES_PASSWORD,
         table="agent_files",
     )
 
 
-# ---------- public API ----------
+# ─── Public API ───
 
 
-async def initialize_pg_backend() -> PostgresBackend:
-    """Initialise the PostgreSQL filesystem backend for DeepAgents.
+async def build_backend_for_tenant(user_id: str, tenant_settings=None) -> PostgresBackend:
+    """Instantiate and initialize a PostgresBackend for a specific tenant.
 
-    Idempotent — returns the existing backend if already initialised.
+    This is a pure function — no caching, no singleton state.
+    The caller (TenantManager) is responsible for caching and lifecycle.
+
+    Args:
+        user_id: The tenant's user ID
+        tenant_settings: Optional settings override
+
+    Returns:
+        Initialized PostgresBackend instance
     """
-    global _backend, _initialized
+    from deepagents_backends import PostgresBackend  # noqa: PLC0415
 
-    if _backend is not None and _initialized:
-        return _backend
+    config = build_tenant_backend_config(user_id, tenant_settings)
+    backend = PostgresBackend(config=config)
+    await backend.initialize()
 
-    config = _build_config()
-    _backend = PostgresBackend(config=config)
-    await _backend.initialize()
-    _initialized = True
-
-    logger.info("PostgreSQL filesystem backend initialised (table=%s)", config.table)
-    return _backend
+    logger.info("PostgreSQL backend initialized for tenant=%s (table=%s)", user_id, config.table)
+    return backend
 
 
-async def close_pg_backend() -> None:
-    """Close the PostgreSQL filesystem backend.
+async def close_tenant_backend(backend: PostgresBackend) -> None:
+    """Close a tenant's backend.
 
-    Idempotent — no-op if not initialised.
+    Args:
+        backend: The backend instance to close
     """
-    global _backend, _initialized
-
-    if _backend is None:
+    if backend is None:
         return
 
-    await _backend.close()
-    _backend = None
-    _initialized = False
-
-
-async def get_pg_backend() -> Optional[PostgresBackend]:
-    """Lazy accessor for the singleton PostgresBackend.
-
-    Lazily initialises the backend on first call if it has not been
-    initialised explicitly via ``initialize_pg_backend()`` yet.
-
-    Returns *None* only if initialisation fails.
-    """
-    global _backend, _initialized
-
-    if _backend is not None and _initialized:
-        return _backend
-
-    if _initialized:
-        return _backend
-
-    try:
-        await initialize_pg_backend()
-    except Exception:
-        _backend = None
-        _initialized = False
-        logger.exception("Failed to lazy-initialise PostgreSQL filesystem backend")
-        return None
-
-    return _backend
+    await backend.close()
+    logger.info("PostgreSQL backend closed for tenant")

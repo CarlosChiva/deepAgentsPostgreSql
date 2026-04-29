@@ -7,51 +7,53 @@
 | Technology | Version | Role |
 |------|---------|------|
 | **Python** | 3.12 | Language runtime |
-| **uv** | latest | Package manager & virtual environment tool (replaces pip + poetry + pipenv) |
-| **FastAPI** | latest | Web framework (ASGI). Used via `fastapi dev` (dev) and `fastapi run` (prod) |
+| **uv** | latest | Package manager & virtual environment tool |
+| **FastAPI** | latest | Web framework (ASGI) — now with user_id middleware |
 | **Uvicorn** | latest | ASGI server (dependency of FastAPI) |
-| **PostgreSQL** | 16-alpine | Database for checkpointer persistence + potential future vector storage |
+| **PostgreSQL** | 16-alpine | Database for checkpointer persistence + multi-tenant DBs |
 
 ### AI / Agent Frameworks
 
 | Technology | Version | Role |
 |------|---------|------|
-| **DeepAgents** | latest | Core agent framework. `create_deep_agent()` instantiates the agent with built-in TodoListMiddleware, FilesystemMiddleware, SubAgentMiddleware. Provides memory, skills, and planning out of the box. |
-| **LangChain** | >=1.0,<2.0 | Base framework. LangChain 1.0 LTS provides models, tools, chains. DeepAgents depends on this. |
-| **langchain-core** | >=1.0,<2.0 | Shared base types & interfaces. Peer dependency always installed with langchain. |
-| **LangGraph** | >=1.0,<2.0 | Orchestration layer (transitive dep of deepagents). Provides StateGraph, checkpointer system, state management. |
-| **LangSmith** | >=0.3.0 | Tracing and observability for LLM calls. |
+| **DeepAgents** | latest | Core agent framework. `create_deep_agent()` with per-user isolation |
+| **LangChain** | >=1.0,<2.0 | Base framework. DeepAgents depends on this |
+| **langchain-core** | >=1.0,<2.0 | Shared base types & interfaces |
+| **LangGraph** | >=1.0,<2.0 | Orchestration layer (transitive dep of deepagents) |
+| **LangSmith** | >=0.3.0 | Tracing and observability for LLM calls |
 
 ### Database & Persistence
 
 | Technology | Version | Role |
 |------|---------|------|
-| **langgraph-checkpoint-postgres** | compatible with langgraph 1.0 | **PostgresSaver** checkpointer. Persists thread states (conversation history + tool execution state) to PostgreSQL. Called on startup with `.setup()` to create checkpoint tables. |
-| **psycopg** | >=3.0 | PostgreSQL async connection library (used by langgraph-checkpoint-postgres internally) |
-| **pgvector** | latest | PostgreSQL extension for vector similarity search (installed via custom Dockerfile). Future-proof for RAG embeddings. |
+| **langgraph-checkpoint-postgres** | compatible with langgraph 1.0 | **PostgresSaver** checkpointer. **Now per-tenant**: each tenant creates its own saver pointing to `deepagent_{user_id}` DB |
+| **psycopg** | >=3.0 | PostgreSQL async connection library. Now used for **dynamic tenant DB creation** via `AsyncConnection` and `CREATE DATABASE` |
+| **pgvector** | latest | PostgreSQL extension for vector similarity search |
 
 ### Security & Validation
 
 | Technology | Version | Role |
 |------|---------|------|
-| **Pydantic** | bundled with fastapi | Data validation for request/response models |
-| **pydantic-settings** | bundled with fastapi | Environment variable management for config |
+| **Pydantic** | bundled with fastapi | Data validation. Now used for `user_id` field validation (pattern, min_length, max_length, blocklist) |
+| **pydantic-settings** | bundled with fastapi | Environment variables. Now used for `TENANT_*` settings |
 
 ### HTTP & Streaming
 
 | Technology | Version | Role |
 |------|---------|------|
-| **sse-starlette** | latest | SSE (Server-Sent Events) support for FastAPI streaming responses |
+| **sse-starlette** | latest | SSE streaming |
+| **FastAPI Middleware** | built-in | `UserMiddleware` (user_id_extractor.py) extracts user_id from headers/query/cookies |
 
 ### Tooling & Quality
 
 | Technology | Version | Role |
 |------|---------|------|
-| **ruff** | latest | Linting and formatting (uvx ruff) |
+| **ruff** | latest | Linting |
 | **ty** | latest | Type checking |
-| **pytest** | latest | Testing framework |
-| **httpx** | latest | HTTP client test framework (FastAPI's TestClient uses it) |
-| **asyncer** | latest | Concurrency management (mixing sync/async) |
+| **pytest** | latest | Testing |
+| **pytest-asyncio** | latest | Async test support |
+| **httpx** | latest | HTTP client testing |
+| **asyncer** | latest | Concurrency management |
 
 ### Docker
 
@@ -60,15 +62,14 @@
 | **Docker** | latest | Container runtime |
 | **Docker Compose** | >=3.8 | Multi-container orchestration |
 
-## Dependency Graph (pyproject.toml dependencies)
+---
+
+## Dependencies (pyproject.toml)
 
 ```toml
 [project]
-name = "chat-api"
-version = "0.1.0"
-requires-python = ">=3.12"
 dependencies = [
-    # --- DeepAgents Core (bundles langgraph internally) ---
+    # --- DeepAgents Core ---
     "deepagents",
     "langchain>=1.0,<2.0",
     "langchain-core>=1.0,<2.0",
@@ -76,17 +77,13 @@ dependencies = [
 
     # --- Persistence ---
     "langgraph-checkpoint-postgres",
+    "psycopg[binary]>=3.0",   # already present; used for tenant DB creation now
 
     # --- Web ---
-    "fastapi[standard]>=0.115.0",       # includes uvicorn, pydantic, pydantic-settings
-    "sse-starlette",                     # SSE streaming for chat responses
+    "fastapi[standard]>=0.115.0",
+    "sse-starlette",
 
-    # --- Model Provider (pick one at minimum) ---
-    # "langchain-openai",               # Uncomment for OpenAI models
-    # "langchain-anthropic",            # Uncomment for Anthropic Claude
-    # "langchain-google-genai",         # Uncomment for Google Gemini
-
-    # --- Tooling / Dev ---
+    # --- Dev ---
     "ruff",
     "pytest",
     "httpx",
@@ -94,7 +91,35 @@ dependencies = [
 ]
 ```
 
-## Architecture Overview (Data Flow)
+**No new external dependencies needed.** Everything is already in `pyproject.toml`.
+
+---
+
+## Multi-Tenancy Configuration
+
+### New Environment Variables (`.env.example`)
+
+```bash
+# Multi-tenancy
+TENANT_PREFIX=deepagent_                  # Prefix for per-user database names
+TENANT_SUPERUSER_DB=postgres              # Base DB for CREATE DATABASE operations
+TENANT_DEFAULT_TTL_SECONDS=3600           # Tenant cache TTL before eviction (1 hour)
+TENANT_ENFORCE_USER_ID=true               # Reject requests without user_id (401)
+TENANT_MAX_CACHE_SIZE=1000                # Maximum tenants held in memory cache
+```
+
+### User ID Validation Rules
+
+```python
+# Format: ^[a-zA-Z0-9_-]+$
+# Length: 1-53 characters (63 max PG DB name - 10 for "deepagent_" prefix)
+# Blocklist: postgres, template0, template1, any starting with "pg_"
+# Source: X-User-ID header (primary) → user_id query param (fallback) → cookie (fallback)
+```
+
+---
+
+## Architecture Overview (Multi-Tenant)
 
 ```
                     ┌─────────────────┐
@@ -102,38 +127,71 @@ dependencies = [
                     │  (Browser/App)  │
                     └────────┬────────┘
                              │
-              HTTP POST /chat   GET /chat/{thread_id}
-              SSE streaming    │
-                    ┌────────▼────────┐
-                    │  FastAPI / Docker │   (services/chat-api/)
-                    │  chat-api service │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┼───────────────┐
-              │              │              │
-              ▼              ▼              ▼
-    ┌───────────────┐  ┌───────────┐  ┌───────────────┐
-    │ DeepAgent     │  │ Pydantic  │  │ SSE Response  │
-    │ (create_      │  │ Models    │  │ (SSE/JSON)    │
-    │  deep_agent)  │  └───────────┘  └───────────────┘
-    └───────┬───────┘
-            │
-            │ thread_id (configurable)
-            ▼
-    ┌───────────────┐     persists states     ┌───────────────┐
-    │ PostgresSaver  │ ───────────────►  │  PostgreSQL     │
-    │ (checkpointer) │                   │  (docker-compose│
-    └───────────────┘                     │   postgres svc) │
-                                          └───────────────┘
+        ┌────────────────────┼────────────────────┐
+        │                    │                     │
+┌───┐   │ X-User-ID header   │ {user_id, msg}     │
+│User│──►│ (middleware: user_   │ POST /chat         │
+│Mid│◄──┘  id_extractor.py)     │ GET /chat/{tid}    │
+└───┘   └────────────────────┘
+        │    request.state.user_id injected
+        ▼
+┌───┐   ┌─────────────────────┐
+│Router│──►  /chat  ──►  send_message(user_id, tid, msg)
+│(chat)│   │                ──►  get_history(user_id, tid)
+└───┘   └─────────┬───────────┘
+                  │
+        ┌─────────▼──────────┐
+        │  Tenant Manager     │  (singleton per-request)
+        │  ┌──┐  ┌──┐         │
+        │  │Cache│Eviction│    │
+        │  └──┘  └──┘         │
+        │  GET or CREATE       │
+        │  TenantStore         │
+        └───┬─────┬───────────┘
+            │     │
+        ┌───▼──┐ ┌▼─────────┐
+        │Tenant│ │CREATE DB │
+        │Store │ │(if new)   │
+        │Data  │ │          │
+        │├──►checkpointer   │
+        │├──►store          │
+        │├──►backend         │
+        │└──►agent           │
+        └──────┴─────┬──────┘
+                     │
+         ┌───────────▼──────────┐
+         │ Per-User DeepAgent   │
+         │ (isolated instance)  │
+         │                      │
+         │ agent.ainvoke()      │
+         └──────┬───────────────┘
+                │
+           ┌────▼────────────────────────────────┐
+           │  Per-User PostgreSQL Database        │
+           │  deepagent_{user_id}                 │
+           │  (dynamically created, isolated)      │
+           │                                       │
+           │  ┌───► checkpoint tables              │
+           │  ┌───► store tables                   │
+           │  ┌───► backend/agent_files            │
+           └──────────────────────────────────────┘
 ```
 
-1. **Client → POST /chat**: Sends `{thread_id, message}` → FastAPI receives → validates with Pydantic model
-2. **FastAPI → DeepAgent**: Calls `agent.invoke(messages, config={"configurable": {"thread_id": thread_id}})` with the LLM model
-3. **DeepAgent → Response**: Agent processes with tools, planning, memory → returns result → streamed back via SSE
-4. **DeepAgent ↔ Persistent State**: `PostgresSaver` automatically persists conversation state to PostgreSQL after each super-step
-5. **Client → GET /chat/{thread_id}**: Retrieves checkpoint history from PostgreSQL → reconstructs message sequence → returns as JSON
+### Data Flow Steps
 
-## Environment Variables Required (`.env.example`)
+1. **Client sends request** with `user_id` in body (`ChatRequest.user_id`), or via `X-User-ID` header, or query param
+2. **UserMiddleware** extracts, validates, and injects `user_id` into `request.state.user_id`
+3. **Router** extracts `user_id` from `request.state` and passes it as first argument to service
+4. **Service** calls `await get_agent_for_user(user_id)` → routes to TenantManager
+5. **TenantManager**:
+   - **Cache hit**: returns existing `TenantStore` with all resources
+   - **Cache miss**: acquires lock → double-check cache → connect to `postgres` DB via superuser → `CREATE DATABASE deepagent_{user_id}` → build tenant URI → create checkpointer/store/backend → create DeepAgent → cache it → return
+6. **Agent** processes with isolated state in `deepagent_{user_id}`
+7. **Response** flows back: agent → service → router → client (JSON or SSE)
+
+---
+
+## Environment Variables Required
 
 ```bash
 # PostgreSQL
@@ -151,23 +209,35 @@ ANTHROPIC_API_KEY=sk-ant-xxx
 # Model Selection
 LLM_MODEL=claude-sonnet-4-5-20250929
 
-# LangSmith (optional but recommended)
+# LangSmith (optional)
 LANGSMITH_API_KEY=ls-proj-xxx
 LANGSMITH_PROJECT=deepagent-postgres
 
 # Chat Service
 CHAT_SERVICE_PORT=8000
 MAX_MESSAGES_PER_THREAD=100
+
+# ─── NEW: Multi-Tenancy ───
+TENANT_PREFIX=deepagent_
+TENANT_SUPERUSER_DB=postgres
+TENANT_DEFAULT_TTL_SECONDS=3600
+TENANT_ENFORCE_USER_ID=true
+TENANT_MAX_CACHE_SIZE=1000
 ```
 
-## Known Risks & Considerations
+---
+
+## Known Risks & Considerations (Updated)
 
 | Risk | Details | Mitigation |
-|------|---------|------------|
-| **DeepAgents version instability** | DeepAgents is a newer framework; APIs may shift | Pin to a tested version in production `DEEPAGENTS>=0.x,<1.0` |
-| **langchain-community not semver** | The community package does not follow semantic versioning | Avoid; use dedicated integrations (e.g., model-specific packages) instead |
-| **PostgresSaver `.setup()` must be called once** | Calling `.setup()` on an already-initialized DB causes errors | Wrap in try/except catching table-already-exists errors, or use a flag in config |
-| **Memory exhaustion with long conversations** | PostgresSaver stores full message history per thread | Add a max messages cap in config; implement message truncation in the service |
-| **No authentication on endpoints** | All endpoints are currently open | Add an optional API key middleware in a future iteration |
-| **FilesystemBackend not for production** | DeepAgents' FilesystemBackend allows arbitrary file access | Use StateBackend in the web server context; never mount FilesystemBackend |
-| **PostgreSQL port 5432 exposed** | Database port accessible from host in dev mode | Remove `ports: 5432:5432` in production compose; keep only internal network |
+|------|--|------------|
+| **DeepAgents version instability** | Pin to tested version in production | `DEEPAGENTS>=0.x,<1.0` |
+| **PostgresSaver `.setup()` on already-initialized DB** | Wrap in try/except | Already handled by existing logic |
+| **Memory exhaustion from many tenants** | TTL eviction + max cache size | `TENANT_DEFAULT_TTL_SECONDS` + `TENANT_MAX_CACHE_SIZE` |
+| **SQL injection via user_id** | user_id validated at middleware | Regex pattern + blocklist + PG max name enforcement |
+| **Tenant DB name length** | PostgreSQL max 63 chars | `max_length=53` on user_id + `deepagent_` prefix |
+| **Race conditions on first use** | Two requests from same user creating DB simultaneously | `asyncio.Lock` + double-check locking |
+| **No authentication** | All endpoints open | Add API key or JWT middleware in future |
+| **Privilege escalation via user_id** | user_id maps directly to DB name | Physical DB isolation is strong enough; admin DB user is always `postgres` |
+| **Resource exhaustion from orphaned DBs** | DBs created but never cleaned up | TTL eviction + manual DELETE endpoint + periodic cleanup task |
+| **FilesystemBackend not for production** | DeepAgents' FilesystemBackend allows arbitrary file access | Use StateBackend in web context; never mount FilesystemBackend |

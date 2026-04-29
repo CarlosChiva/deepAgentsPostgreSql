@@ -1,14 +1,14 @@
 """Health check helpers for the DeepAgents Chat API.
 
-Provides individual health probes (postgres, checkpointer, agent) and a
-composite ``check_health()`` utility that combines them into a single status
-dictionary suitable for the ``/health`` endpoint.
+Provides a single ``check_health()`` probe that checks PostgreSQL connectivity
+and returns a composite status dictionary for the ``/health`` endpoint.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from psycopg import connect
 from psycopg.pq import ConnStatus
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 def check_postgres() -> str:
     """Ping PostgreSQL with a short-lived synchronous connection.
 
-    Creates a fresh connection, runs ``SELECT 1``, then closes it
-    immediately — no pool resources are consumed.
+    Creates a fresh connection, runs ``SELECT 1``, then closes immediately
+    (no pool resources are consumed).
     """
     conn = None
     try:
@@ -40,58 +40,16 @@ def check_postgres() -> str:
                 pass
 
 
-def check_checkpointer() -> str:
-    """Verify the checkpointer can be obtained and its connection is idle."""
-    try:
-        # Lazy import to avoid circular dependencies at module load time.
-        from app.database import _checkpointer, _checkpointer_initialized
-
-        if not _checkpointer_initialized:
-            return "error"
-
-        # _checkpointer is the already-initialized global (set during startup).
-        if _checkpointer is None:
-            return "error"
-
-        # PostgresSaver exposes ``.conn`` (not ``get_conn()``).
-        conn = _checkpointer.conn
-        return "ok" if conn.info.status == ConnStatus.IDLE else "error"
-    except Exception as exc:
-        logger.warning("Checkpointer probe failed: %s", exc)
-        return "error"
-
-
-def check_agent() -> str:
-    """Verify the DeepAgent singleton can be retrieved.
-
-    Uses the module-level ``_agent`` global directly to avoid the
-    ``RuntimeError: asyncio.run() cannot be called from a running event loop``
-    that would occur when calling ``get_agent()`` (a coroutine) during a
-    synchronous health check inside FastAPI.
-    """
-    try:
-        # Lazy import to avoid circular dependencies at module load time.
-        from app.agent import _agent  # noqa: E402
-
-        if _agent is None:
-            return "error"
-        return "ok"
-    except Exception as exc:
-        logger.warning("Agent probe failed: %s", exc)
-        return "error"
-
-
-def check_health() -> dict:
+def check_health() -> dict[str, Any]:
     """Run all probes and return a composite health dictionary.
 
-    *All ok*       → ``"ok"``
-    *Some failed*  → ``"degraded"``
+    *All ok*       \u2192 ``"ok"``
+    *Some failed*  \u2192 ``"degraded"``
     """
+    pg_status = check_postgres()
     results = {
         "status": "ok",
-        "postgres": check_postgres(),
-        "checkpointer": check_checkpointer(),
-        "agent": check_agent(),
+        "postgres": pg_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if any(v == "error" for v in results.values() if v != "ok" and v is not None):

@@ -8,6 +8,13 @@ class ChatRequest(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    user_id: str = Field(
+        min_length=1,
+        max_length=53,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+        description="Unique identifier for the user making this request (tenant identifier)",
+        examples=["user-abc123", "user_xyz"],
+    )
     message: str = Field(
         min_length=1,
         max_length=10000,
@@ -29,6 +36,10 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Schema for a standard (non-streamed) chat response."""
 
+    user_id: str = Field(
+        description="The user ID associated with this conversation",
+        examples=["user-abc123"],
+    )
     thread_id: str = Field(
         description="The thread this conversation is part of",
         examples=["conv-abc123"],

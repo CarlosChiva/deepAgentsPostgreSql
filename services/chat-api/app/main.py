@@ -5,32 +5,22 @@ into a single FastAPI instance.  Uses the modern *lifespan* pattern for startup
 and shutdown lifecycle management (replaces the deprecated ``@app.on_event``).
 """
 
-import json
 import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.agent import get_agent
-from app.backends import close_pg_backend, initialize_pg_backend
 from app.config import settings
-from app.database import (
-    close_checkpointer,
-    close_store,
-    ensure_db_exists,
-    set_shutting_down,
-    get_checkpointer,
-    
-)
+from app.database import init_db_tables
 
 logger = logging.getLogger(__name__)
 
-# -------------- -------------- -------------- -------------- -------------- #
+# ---------- ---- ---------- ---- ---------- ---- ---------- ---- ---------- ---- #
 # Module-level flag set at the end of startup so ``/ready`` can read it.
-# -------------- -------------- -------------- -------------- -------------- #
+# ---------- ---- ---------- ---- ---------- ---- ---------- ---- ---------- ---- #
 _startup_complete: bool = False
 _startup_failed: bool = False
 
@@ -41,44 +31,21 @@ _startup_failed: bool = False
 async def lifespan(app: FastAPI):
     """Manages startup and shutdown lifecycle events.
 
-    On startup the PostgreSQL checkpointer tables are created (idempotent) and
-    the DeepAgent instance is initialised so it is ready for the first request.
+    On startup the checkpointer and store tables are initialised on the
+    shared PostgreSQL database.
 
-    On shutdown the checkpointer connection pool is closed and a module-level
-    flag causes all subsequent requests to receive a 503.
+    On shutdown all resources are cleaned up.
     """
 
-    # ---- startup phase ------ ------ ------ ------ ------ ------ ------ ->
-
     global _startup_complete, _startup_failed
-    logger.info("Starting up DeepAgents Chat API …")
-
-    # Ensure the target database exists before attempting table setup
-    try:
-        await ensure_db_exists(settings.postgres_url)
-    except Exception as exc:
-        logger.warning("ensure_db_exists failed (best effort): %s", exc)
-        # Proceed anyway — downstream code will surface the real error
+    logger.info("Starting up DeepAgents Chat API \u2026")
 
     try:
-        await get_checkpointer()
-        logger.info("PostgreSQL checkpointer initialised")
+        await init_db_tables()
+        logger.info("Database tables initialised")
     except Exception as exc:
-        logger.error("Failed to set up checkpointer during startup: %s", exc)
+        logger.error("Failed to initialise database tables during startup: %s", exc)
         _startup_failed = True
-
-    try:
-        await get_agent()
-        logger.info("DeepAgent instance initialised")
-    except Exception as exc:
-        logger.error("Failed to initialise agent during startup: %s", exc)
-        _startup_failed = True
-
-    try:
-        await initialize_pg_backend()
-        logger.info("PostgreSQL filesystem backend initialised")
-    except Exception as exc:
-        logger.warning("Failed to set up postgres filesystem backend: %s", exc)
 
     if not _startup_failed:
         _startup_complete = True
@@ -86,7 +53,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.error(
             "Application startup completed with errors"
-            " — some features unavailable"
+            " \u2014 some features unavailable"
         )
 
     # Yield -- app is now serving requests
@@ -95,14 +62,7 @@ async def lifespan(app: FastAPI):
     # ---- shutdown phase ------ ------ ------ ------ ------ ------ ----
 
     _startup_complete = False
-    logger.info("Shutdown starting …")
-    set_shutting_down(True)
-    logger.info("Shutdown flag set -- no new requests accepted")
-
-    await close_pg_backend()
-    await close_store()
-    await close_checkpointer()
-
+    logger.info("Shutdown starting \u2026")
     logger.info("Shutdown complete")
 
 
@@ -110,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="DeepAgents Chat API",
-    description="Backend para chatbot multi-hilo con DeepAgents y PostgreSQL",
+    description="Chat API with DeepAgents and PostgreSQL",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -120,7 +80,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -132,10 +92,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests_time(request: Request, call_next):
-    """Log every request's method, path, status code, and duration."
-
-    Middleware runs *before* the request handler and *after* the response.
-    """
+    """Log every request's method, path, status code, and duration."""
 
     timer = time.perf_counter()
 
@@ -158,30 +115,7 @@ async def log_requests_time(request: Request, call_next):
     return response
 
 
-# ------ shutdown-reject middleware ------ ------ ------ ------ ------ ->
-
-
-@app.middleware("http")
-async def reject_shutdown_requests(request: Request, call_next):
-    """Return 503 when the app is in the shutdown phase."
-
-    Any request arriving after ``set_shutting_down(True)`` is rejected.
-    """
-    from app.database import is_shutting_down  # noqa: E402 -- local import
-
-    if is_shutting_down():
-        body = json.dumps({"detail": "Service shutting down"}).encode()
-        return Response(
-            status_code=503,
-            content=body,
-            media_type="application/json",
-        )
-
-    return await call_next(request)
-
-
 # ------ routers ------ ------ ------ ------ ------ ------ ------ ------ ---
-# noqa: E402 — imported after app creation
 
 from app.routers.chat import router as chat_router  # noqa: E402
 
@@ -196,7 +130,7 @@ from app.health import check_health  # noqa: E402
 
 @app.get("/health", tags=["utils"])
 async def health() -> JSONResponse:
-    """Extended health-check: postgres, checkpointer, agent."
+    """Extended health-check: postgres.
 
     Returns ``status=200`` when all subsystems are healthy,
     ``status=503`` when one or more subsystems are degraded.
@@ -211,9 +145,9 @@ async def health() -> JSONResponse:
 
 @app.get("/ready", tags=["utils"])
 async def ready() -> JSONResponse:
-    """Readiness probe — ``True`` once startup phase has completed."
+    """Readiness probe \u2014 ``True`` once startup phase has completed.
 
-    Typically used by K8s ``startupProbe`` / ``readinessProbe`.
+    Typically used by K8s ``startupProbe`` / ``readinessProbe``.
     """
     if not _startup_complete or _startup_failed:
         return JSONResponse(
