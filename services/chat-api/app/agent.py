@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from deepagents.backends import CompositeBackend, StateBackend
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # ← CORREGIDO
 from langgraph.store.postgres import AsyncPostgresStore
 
+from .backends import get_pg_backend
 from .config import settings
 from .database import get_checkpointer, get_store, is_checkpointer_ready
 
@@ -117,6 +119,16 @@ async def _build_agent() -> Any:
     checkpointer: AsyncPostgresSaver = await get_checkpointer()  # ← tipo corregido
     store: AsyncPostgresStore = await get_store()
 
+    # ---------- filesystem backend ----------
+    # CompositeBackend: ephemeral working files + persistent PostgreSQL storage
+    pg_backend = await get_pg_backend()
+    backend = CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/": pg_backend,
+        },
+    )
+
     # ---------- agent ----------
     from deepagents import create_deep_agent
 
@@ -128,6 +140,7 @@ async def _build_agent() -> Any:
         ),
         checkpointer=checkpointer,
         store=store,
+        backend=backend,
     )
 
     logger.info(

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agent import get_agent
+from app.backends import close_pg_backend, initialize_pg_backend
 from app.config import settings
 from app.database import (
     close_checkpointer,
@@ -73,6 +74,12 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to initialise agent during startup: %s", exc)
         _startup_failed = True
 
+    try:
+        await initialize_pg_backend()
+        logger.info("PostgreSQL filesystem backend initialised")
+    except Exception as exc:
+        logger.warning("Failed to set up postgres filesystem backend: %s", exc)
+
     if not _startup_failed:
         _startup_complete = True
         logger.info("Application startup complete")
@@ -92,6 +99,7 @@ async def lifespan(app: FastAPI):
     set_shutting_down(True)
     logger.info("Shutdown flag set -- no new requests accepted")
 
+    await close_pg_backend()
     await close_store()
     await close_checkpointer()
 

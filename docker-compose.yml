@@ -39,4 +39,4 @@ services:
 # Named volumes for data persistence
 volumes:
   pgdata:
-  ollama_data:
+
