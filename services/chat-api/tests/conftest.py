@@ -53,10 +53,10 @@ def _override_settings(monkeypatch):  # noqa: ANN201
 
 
 def _reset_db_module_singletons():
-    """Reset module-level state in ``app.database`` so every test gets a
+    """Reset module-level state in ``app.infrastructure.database`` so every test gets a
     fresh checkpointer / store pair rather than reusing a previous one.
     """
-    from app import database  # noqa: E402
+    from app.infrastructure import database  # noqa: E402
 
     database._checkpointer = None
     database._checkpointer_initialized = False
@@ -66,7 +66,7 @@ def _reset_db_module_singletons():
 
 def _reset_agent_singleton():
     """Clear the cached agent singleton so the test build a new one."""
-    from app import agent as agent_mod  # noqa: E402
+    from app.core import agent as agent_mod  # noqa: E402
 
     agent_mod._agent = None
 
@@ -96,8 +96,9 @@ def test_db_uri(test_settings) -> str:
         POSTGRES_DB="test_chatdb",
         POSTGRES_USER="testuser",
         POSTGRES_PASSWORD="testpass",
+        postgres_uri=f"postgresql://testuser:testpass@localhost:5433/test_chatdb",
     )
-    return str(_test_settings.postgres_url)
+    return str(_test_settings.postgres_uri)
 
 
 # ── checkpointer ─────────────────────────────────────────────────────────────────
@@ -170,12 +171,12 @@ def test_store(test_settings, test_db_uri) -> Generator[AsyncPostgresStore, None
 
 def _inject_into_database_module(test_checkpointer, test_store):
     """Mutate ``app.database`` so its singleton getters return our test objects."""
-    from app import database as db_mod  # noqa: E402
+    from app.infrastructure import database as db_mod  # noqa: E402
 
-    db_mod._checkpointer = test_checkpointer
-    db_mod._checkpointer_initialized = True
-    db_mod._store = test_store
-    db_mod._store_initialized = True
+    db_mod.checkpointer = test_checkpointer
+    db_mod.checkpointer_initialized = True
+    db_mod.store = test_store
+    db_mod.store_initialized = True
 
 
 # ── client ────────────────────────────────────────────────────────────────────────
@@ -213,7 +214,7 @@ def test_agent_monkeypatch(monkeypatch) -> MagicMock:
         },
     )
 
-    monkeypatch.setattr("app.agent._agent", mock_agent)
+    monkeypatch.setattr("app.core.agent._agent", mock_agent)
     return mock_agent
 
 
@@ -237,7 +238,7 @@ def client(
     _reset_agent_singleton()
 
     # Also monkeypatch the module-level agent variable for import-level overrides
-    from app import agent as agent_mod  # noqa: E402
+    from app.core import agent as agent_mod  # noqa: E402
     agent_mod._agent = test_agent_monkeypatch
 
     from app.routers.chat import router as chat_router  # noqa: E402
@@ -245,7 +246,7 @@ def client(
     # Dependency overrides for the router -- ``send_message`` and ``get_history``
     # call ``get_agent`` and ``get_checkpointer`` internally; by overriding them
     # at the module level we ensure the service layer sees our test doubles.
-    from app import database as db_mod  # noqa: E402
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_get_checkpointer = MagicMock(return_value=test_checkpointer)
     mock_get_store = MagicMock(return_value=test_store)
@@ -265,7 +266,7 @@ def client(
 
     # Restore original functions on the database module
     import importlib  # noqa: E402
-    from app import database as _orig_db  # noqa: E402
+    from app.infrastructure import database as _orig_db  # noqa: E402
 
     importlib.reload(_orig_db)
     _reset_agent_singleton()
@@ -282,10 +283,10 @@ async def async_client(
     _inject_into_database_module(test_checkpointer, test_store)
     _reset_agent_singleton()
 
-    from app import agent as agent_mod  # noqa: E402
+    from app.core import agent as agent_mod  # noqa: E402
     agent_mod._agent = test_agent_monkeypatch
 
-    from app import database as db_mod  # noqa: E402
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_get_checkpointer = MagicMock(return_value=test_checkpointer)
     mock_get_store = MagicMock(return_value=test_store)
@@ -301,7 +302,7 @@ async def async_client(
     yield ac
 
     import importlib  # noqa: E402
-    from app import database as _orig_db  # noqa: E402
+    from app.infrastructure import database as _orig_db  # noqa: E402
 
     importlib.reload(_orig_db)
     _reset_agent_singleton()
@@ -337,7 +338,7 @@ def test_agent(monkeypatch) -> MagicMock:
         },
     )
 
-    monkeypatch.setattr("app.agent._agent", mock_agent)
+    monkeypatch.setattr("app.core.agent._agent", mock_agent)
     _reset_agent_singleton()
 
     return mock_agent
@@ -379,7 +380,7 @@ async def tenant_manager(test_settings) -> "TenantManager":
     Yields the manager instance; on teardown calls ``reset_tenant_manager()``
     and clears the singleton.
     """
-    from app.tenant_manager import TenantManager, reset_tenant_manager  # noqa: E402
+    from app.agents.tenant import TenantManager, reset_tenant_manager  # noqa: E402
 
     manager = TenantManager(ttl_seconds=3600, max_cache_size=100)
     yield manager
@@ -394,5 +395,5 @@ async def reset_tenant_manager_fixture(tenant_manager) -> None:
 
     Useful for tests that need to manually reset between sub-scenarios.
     """
-    from app.tenant_manager import reset_tenant_manager  # noqa: E402
+    from app.agents.tenant import reset_tenant_manager  # noqa: E402
     yield reset_tenant_manager

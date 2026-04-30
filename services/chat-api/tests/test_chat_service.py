@@ -18,19 +18,20 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sse_starlette import EventSourceResponse
-from app.models.chat import ChatResponse
+from app.schemas.response import ChatResponse
 
 
 # ===== Helpers =================================================================
 
 def _reset_state():
     """Reset all module-level singletons used by agent / database."""
-    from app import agent, database  # noqa: E402
-    agent.reset_agent()
-    database._checkpointer = None
-    database._checkpointer_initialized = False
-    database._store = None
-    database._store_initialized = False
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod
+    agent_mod._agent = None
+    db_mod.checkpointer = None
+    db_mod.checkpointer_initialized = False
+    db_mod.store = None
+    db_mod.store_initialized = False
 
 
 def _patch_agent_and_db(mock_agent=None, mock_checkpointer=None):
@@ -38,7 +39,7 @@ def _patch_agent_and_db(mock_agent=None, mock_checkpointer=None):
 
     Returns (mock_agent, mock_checkpointer) for assertion after the ``with`` block.
     """
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod, infrastructure as db_mod  # noqa: E402
 
     if mock_agent is None:
         mock_agent = MagicMock()
@@ -50,7 +51,7 @@ def _patch_agent_and_db(mock_agent=None, mock_checkpointer=None):
 
     return (
         patch.object(agent_mod, "get_agent", return_value=mock_agent),
-        patch.object(db_mod, "get_checkpointer", return_value=mock_checkpointer),
+        patch.object(db_mod.database, "get_checkpointer", return_value=mock_checkpointer),
     ), mock_agent, mock_checkpointer
 
 
@@ -68,8 +69,8 @@ async def test_send_message_calls_agent_invoke_correctly():
     )
     mock_checkpointer = MagicMock()
 
-    with patch.object(__import__("app.agent").agent, "get_agent", return_value=mock_agent), \
-         patch.object(__import__("app.database").database, "get_checkpointer", return_value=mock_checkpointer):
+    with patch.object(__import__("app.core.agent").agent, "get_agent", return_value=mock_agent), \
+         patch.object(__import__("app.infrastructure.database").database, "get_checkpointer", return_value=mock_checkpointer):
 
         from app.services.chat_service import send_message  # noqa: E402
         result = await send_message(message="Hello", thread_id="test-thread")
@@ -96,7 +97,8 @@ async def test_send_message_returns_streaming_response_when_requested():
     """When stream=True, send_message returns an EventSourceResponse with SSE headers."""
     _reset_state()
 
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_agent = MagicMock()
 
@@ -109,7 +111,7 @@ async def test_send_message_returns_streaming_response_when_requested():
     mock_checkpointer = MagicMock()
 
     with patch.object(agent_mod, "get_agent", return_value=mock_agent), \
-         patch.object(db_mod, "get_checkpointer", return_value=mock_checkpointer):
+         patch.object(db_mod.database, "get_checkpointer", return_value=mock_checkpointer):
 
         from app.services.chat_service import send_message  # noqa: E402
         result = await send_message(message="stream me", thread_id="sse-thread", stream=True)
@@ -123,14 +125,15 @@ async def test_send_message_handles_agent_errors():
     _reset_state()
 
     from fastapi import HTTPException  # noqa: E402
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(side_effect=Exception("LLM error"))
     mock_checkpointer = MagicMock()
 
     with patch.object(agent_mod, "get_agent", return_value=mock_agent), \
-         patch.object(db_mod, "get_checkpointer", return_value=mock_checkpointer):
+         patch.object(db_mod.database, "get_checkpointer", return_value=mock_checkpointer):
 
         from app.services.chat_service import send_message  # noqa: E402
 
@@ -172,7 +175,7 @@ async def test_get_history_returns_messages_from_store():
     """get_history returns messages reconstructed from checkpoint state history."""
     _reset_state()
 
-    from app import database as db_mod  # noqa: E402
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     # Build mock checkpoint states
     state1 = MagicMock()
@@ -212,7 +215,7 @@ async def test_get_history_returns_empty_for_new_thread():
     """A brand-new thread_id yields an empty message list (no error)."""
     _reset_state()
 
-    from app import database as db_mod  # noqa: E402
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_checkpointer = MagicMock()
     mock_checkpointer.get_state_history = MagicMock(return_value=[])
@@ -241,8 +244,8 @@ async def test_chat_response_has_expected_structure():
     )
     mock_checkpointer = MagicMock()
 
-    with patch.object(__import__("app.agent").agent, "get_agent", return_value=mock_agent), \
-         patch.object(__import__("app.database").database, "get_checkpointer", return_value=mock_checkpointer):
+    with patch.object(__import__("app.core.agent").agent, "get_agent", return_value=mock_agent), \
+         patch.object(__import__("app.infrastructure.database").database, "get_checkpointer", return_value=mock_checkpointer):
 
         from app.services.chat_service import send_message  # noqa: E402
         result = await send_message(message="Hello", thread_id="test-thread")
@@ -290,7 +293,8 @@ def test_extract_reply_from_dict_with_object_msgs():
 async def test_send_message_handles_db_unavailable():
     """When get_checkpointer raises, send_message returns HTTPException(503)."""
     from fastapi import HTTPException  # noqa: E402
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(
@@ -298,7 +302,7 @@ async def test_send_message_handles_db_unavailable():
     )
 
     with patch.object(agent_mod, "get_agent", return_value=mock_agent), \
-         patch.object(db_mod, "get_checkpointer", side_effect=OSError("connection refused")):
+         patch.object(db_mod.database, "get_checkpointer", side_effect=OSError("connection refused"))):
 
         from app.services.chat_service import send_message  # noqa: E402
 
@@ -311,7 +315,8 @@ async def test_send_message_handles_db_unavailable():
 @pytest.mark.asyncio
 async def test_send_message_handles_checkpointer_setup_error():
     """If checkpointer.setup() fails during send_message, it is re-raised."""
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(
@@ -322,7 +327,7 @@ async def test_send_message_handles_checkpointer_setup_error():
     mock_cp.setup = MagicMock(side_effect=OSError("table not found"))
 
     with patch.object(agent_mod, "get_agent", return_value=mock_agent), \
-         patch.object(db_mod, "get_checkpointer", return_value=mock_cp):
+         patch.object(db_mod.database, "get_checkpointer", return_value=mock_cp):
 
         from app.services.chat_service import send_message  # noqa: E402
 
@@ -341,7 +346,8 @@ async def test_send_message_streaming_yields_sse_events():
     """Streaming response contains at least one 'message' event with chunk data."""
     _reset_state()
 
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod
+    from app.infrastructure import database as db_mod  # noqa: E402
 
     async def _fake_stream(*args, **kwargs):
         yield {"messages": [{"role": "assistant", "content": "chunk1"}]}
@@ -352,7 +358,7 @@ async def test_send_message_streaming_yields_sse_events():
     mock_checkpointer = MagicMock()
 
     with patch.object(agent_mod, "get_agent", return_value=mock_agent), \
-         patch.object(db_mod, "get_checkpointer", return_value=mock_checkpointer):
+         patch.object(db_mod.database, "get_checkpointer", return_value=mock_checkpointer):
 
         from app.services.chat_service import send_message  # noqa: E402
 

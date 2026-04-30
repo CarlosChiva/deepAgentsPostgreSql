@@ -10,10 +10,9 @@ from typing import Any
 from fastapi import HTTPException
 from sse_starlette import EventSourceResponse
 
-from app.agent import get_agent_for_user
-from app.config import Settings
-from app.models.chat import ChatResponse
-from app.models.history import ChatHistoryResponse, MessageItem
+from app.core.config import Settings
+from app.models.response import ChatResponse
+from app.models.response import ChatHistoryResponse, MessageItem
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,6 @@ async def send_message(
     message: str,
     thread_id: str,
     stream: bool = False,
-    settings: Settings | None = None,
 ) -> ChatResponse | EventSourceResponse:
     """Send a user message to the chat agent and return its reply."""
 
@@ -32,7 +30,7 @@ async def send_message(
     if not thread_id or not thread_id.strip():
         raise HTTPException(status_code=400, detail="Thread ID is required")
 
-    if not user_id and settings is not None and settings.TENANT_ENFORCE_USER_ID:
+    if not user_id and Settings().TENANT_ENFORCE_USER_ID:
         raise HTTPException(status_code=400, detail="user_id is required")
 
     try:
@@ -64,7 +62,7 @@ async def send_message(
             data = json.dumps({"done": True, "user_id": uid})
             yield {"event": "message", "data": data}
 
-        def _error_handler(exc):
+        def _error_handler(exc: Exception) -> None:
             logger.error("SSE streaming error: %s", exc)
 
         return EventSourceResponse(_event_generator(), event_error_handler=_error_handler)
@@ -99,12 +97,10 @@ def _extract_reply(result: Any) -> str | None:
         messages = result.get("messages", [])
         for msg in reversed(messages):
             if isinstance(msg, dict):
-                # LangChain usa "role": "assistant" en dicts
                 role = msg.get("role") or msg.get("type", "")
                 if role in ("assistant", "ai") and msg.get("content"):
                     return str(msg["content"]).strip() or None
             else:
-                # Objetos LangChain (AIMessage) usan .type == "ai", no .role
                 msg_type = getattr(msg, "type", None)
                 content = getattr(msg, "content", None)
                 if msg_type == "ai" and content:
@@ -130,20 +126,16 @@ async def get_history(
         logger.error("Failed to obtain agent: %s", e)
         raise HTTPException(status_code=503, detail="Service unavailable") from e
 
-    # The agent encapsulates the tenant-specific checkpointer
     checkpointer = agent.checkpointer
 
     config = {"configurable": {"thread_id": thread_id}}
 
     try:
-        # Aget devuelve el checkpoint más reciente (es async)
-        # No usar get_state_history() — no existe en AsyncPostgresSaver
         checkpoint = await checkpointer.aget(config)
     except Exception as e:
         logger.error("aget failed for thread_id=%s: %s", thread_id, e)
         raise HTTPException(status_code=503, detail="Service unavailable") from e
 
-    # Thread sin historial — respuesta vacía válida, no es error
     if checkpoint is None:
         return ChatHistoryResponse(
             thread_id=thread_id,
@@ -152,13 +144,11 @@ async def get_history(
             message_count=0,
         )
 
-    # Los mensajes viven en channel_values["messages"]
     raw_messages: list = checkpoint.get("channel_values", {}).get("messages", [])
 
     message_items: list[MessageItem] = []
     for msg in raw_messages:
         if hasattr(msg, "type") and hasattr(msg, "content"):
-            # Objeto LangChain: HumanMessage (.type="human"), AIMessage (.type="ai")
             role = _normalize_role(msg.type)
             content = str(msg.content)
         elif isinstance(msg, dict):
@@ -168,7 +158,6 @@ async def get_history(
         else:
             continue
 
-        # Filtrar mensajes de herramientas internos si no se quieren exponer
         if not content:
             continue
 
@@ -189,7 +178,7 @@ async def get_history(
 
 
 def _normalize_role(msg_type: str) -> str:
-    """Convierte tipos internos de LangChain a roles legibles por la API."""
+    """ConvertLangChain internal types to API-readable roles."""
     return {
         "human": "user",
         "ai": "assistant",
@@ -197,3 +186,10 @@ def _normalize_role(msg_type: str) -> str:
         "system": "system",
         "function": "tool",
     }.get(msg_type, msg_type)
+
+
+async def get_agent_for_user(user_id: str) -> Any:
+    """Get or create the DeepAgent for a specific user."""
+    from app.agents.tenant import get_tenant_manager
+    mgr = get_tenant_manager()
+    return await mgr.get_or_create_agent(user_id)

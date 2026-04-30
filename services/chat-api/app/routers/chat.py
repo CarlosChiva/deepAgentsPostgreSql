@@ -1,10 +1,22 @@
+"""Chat router with strong typing, Annotated parameters, and dependency aliases.
+
+All path/query parameters use ``Annotated`` declarations and the router
+leverages the dependency aliases from ``app.core.dependencies`` for
+reusable, testable injection of validated values.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Path
+from sse_starlette import EventSourceResponse
 
-from app.config import settings
-from app.models.chat import ChatRequest
-from app.models.history import ChatHistoryResponse
+from app.core.config import settings
+from app.core.dependencies import ValidatedUserIdDep
+from app.models.request import ChatRequest
+from app.models.response import ChatHistoryResponse, ChatResponse
 from app.services.chat_service import get_history, send_message
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -12,6 +24,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post(
     "/",
+    response_model=ChatResponse,
     summary="Send a message to the chat",
     description=(
         "Submit a message to the chatbot. Optionally enable real-time "
@@ -20,51 +33,38 @@ router = APIRouter(prefix="/chat", tags=["chat"])
     ),
 )
 async def post_chat(
-    body: ChatRequest
-):
+    body: ChatRequest,
+) -> ChatResponse | EventSourceResponse:
     """Accept a user message and return the agent's response (or SSE stream).
 
-    user_id is extracted from the parsed request body.
+    The user_id is taken from the request body, validated by the
+    Pydantic model, then forwarded to the chat service.
     """
-
-    # Extract user_id from the parsed request body.
-    # The Pydantic model (ChatRequest) already enforces min_length=1
-    # and pattern validation, so we don't need an additional enforcement check.
     user_id = body.user_id
-
-    # Validate format if a user_id is present
-    # if user_id:
-    #     try:
-    #         user_id = validate_user_id(user_id)
-    #     except HTTPException as e:
-    #         raise HTTPException(
-    #             status_code=e.status_code, detail=e.detail
-    #         )
 
     thread_id = body.thread_id or str(uuid4())
     effective_stream = body.stream if body.stream is not None else False
 
     try:
         if effective_stream:
-            result = await send_message(
+            return await send_message(
                 user_id=user_id,
                 message=body.message,
                 thread_id=thread_id,
                 stream=True,
             )
-            return result
-        else:
-            response = await send_message(
-                user_id=user_id,
-                message=body.message,
-                thread_id=thread_id,
-                stream=False,
-            )
-            response.user_id = user_id
-            return response
+
+        response = await send_message(
+            user_id=user_id,
+            message=body.message,
+            thread_id=thread_id,
+            stream=False,
+        )
+        response.user_id = user_id
+        return response
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         err = str(e)
         raise HTTPException(
             status_code=500,
@@ -84,36 +84,28 @@ async def post_chat(
     ),
 )
 async def get_chat_history(
-    user_id:str,
-    thread_id: str,
-
-):
+    user_id: Annotated[str, Path(description="The user ID for the tenant")],
+    thread_id: Annotated[str, Path(description="The thread identifier")],
+    validated_user_id: ValidatedUserIdDep,
+) -> ChatHistoryResponse:
     """Return the message history for a specific conversation thread.
 
-    user_id is extracted from the middleware-injected request state,
-    which may come from headers or from the request body if provided.
+    user_id is taken from the URL path; the ``ValidatedUserIdDep``
+    dependency validates the identifier from headers / query / cookie
+    before the handler body runs. The validated_user_id is then compared
+    against the path user_id to prevent cross-user access.
     """
-
-    # GET endpoint: user_id may come from headers/query params
-    # injected by the middleware into scope["state"], or from the
-    # request body if provided via X-User-ID header.
-    
-    # Enforce presence when TENANT_ENFORCE_USER_ID is on
     if not user_id and settings.TENANT_ENFORCE_USER_ID:
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid user_id",
         )
 
-    # Validate format if a user_id is present
-    # if user_id:
-    #     try:
-    #         user_id = validate_user_id(user_id)
-    #     except HTTPException as e:
-    #         raise HTTPException(
-    #             status_code=e.status_code,
-    #             detail=e.detail,
-    #         )
+    if user_id != validated_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
 
     try:
         history = await get_history(user_id=user_id, thread_id=thread_id)
@@ -127,7 +119,7 @@ async def get_chat_history(
                 detail=detail,
             ) from None
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         err = str(e)
         raise HTTPException(
             status_code=500,

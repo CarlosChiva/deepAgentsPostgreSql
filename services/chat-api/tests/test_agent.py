@@ -41,13 +41,13 @@ def mock_anthropic_env(monkeypatch):
 @pytest.fixture(scope="function")
 def fresh_state():
     """Reset tenant-manager singleton so every test starts clean."""
-    from app.tenant_manager import reset_tenant_manager  # noqa: E402
+    from app.agents.tenant import reset_tenant_manager  # noqa: E402
     await reset_tenant_manager()
 
 
 # Backwards-compatible wrapper so that existing ``_fresh_state()`` calls keep working
 async def _fresh_state():  # noqa: E303
-    from app.tenant_manager import reset_tenant_manager  # noqa: E402
+    from app.agents.tenant import reset_tenant_manager  # noqa: E402
     await reset_tenant_manager()
 
 
@@ -64,8 +64,8 @@ async def test_get_agent_for_user_returns_cached_instance(mock_openai_env):
 
     with patch("langchain_openai.ChatOpenAI", return_value=mock_model) as mock_cls, \
          patch("deepagents.create_deep_agent", return_value=MagicMock()) as mock_create, \
-         patch("app.agent.get_checkpointer") as mock_cp, \
-         patch("app.agent.get_store") as mock_st:
+          patch("app.core.agent.get_checkpointer") as mock_cp, \
+          patch("app.core.agent.get_store") as mock_st:
 
         mock_cp.return_value = MagicMock()
         mock_st.return_value = MagicMock()
@@ -86,11 +86,11 @@ async def test_setup_agent_initializes_checkpointer(mock_openai_env):
     """
     await _fresh_state()
 
-    from app import agent as agent_mod, database as db_mod  # noqa: E402
+    from app.core import agent as agent_mod, infrastructure as db_mod  # noqa: E402
 
     mock_saver_instance = MagicMock()
 
-    with patch.object(db_mod, "PostgresSaver") as MockSaver:
+    with patch.object(db_mod.database, "PostgresSaver") as MockSaver:
         MockSaver.from_conn_string.return_value = mock_saver_instance
         agent_mod.setup_agent()
 
@@ -227,7 +227,7 @@ async def test_per_user_agent_isolation():
     """Different users get different agent instances."""
     _fresh_state()
 
-    from app.tenant_manager import TenantManager
+    from app.agents.tenant import TenantManager
 
     manager = TenantManager(ttl_seconds=3600, max_cache_size=100)
     mock_settings = MagicMock()
@@ -236,14 +236,11 @@ async def test_per_user_agent_isolation():
     agent_a = MagicMock()
     agent_b = MagicMock()
 
-    with patch("app.tenant_manager.create_tenant_database", return_value=True), \
-         patch("app.tenant_manager.ensure_tenant_schema"), \
-         patch("app.tenant_manager.get_tenant_connection_string", return_value="postgresql:///x"), \
-         patch("app.tenant_manager.AsyncPostgresSaver") as MockSaver, \
-         patch("app.tenant_manager.AsyncPostgresStore") as MockStore, \
-         patch("app.tenant_manager.build_backend_for_tenant"), \
-         patch("app.tenant_manager._build_model", return_value=MagicMock()), \
-         patch("app.tenant_manager._build_agent", side_effect=[agent_a, agent_b]):
+    with patch("app.agents.tenant._create_tenant_db", return_value="postgresql:///x"), \
+         patch("app.agents.tenant.AsyncPostgresSaver") as MockSaver, \
+         patch("app.agents.tenant.AsyncPostgresStore") as MockStore, \
+         patch("app.agents.tenant.build_model", return_value=MagicMock()), \
+         patch("app.agents.tenant.create_deep_agent", side_effect=[agent_a, agent_b]):
 
         MockSaver.from_conn_string.return_value.__aenter__ = MagicMock()
         MockSaver.from_conn_string.return_value.__aexit__ = MagicMock()
@@ -266,7 +263,7 @@ async def test_get_agent_for_user_from_own_tenant_manager(mock_openai_env):
     from app import agent as agent_mod  # noqa: E402
 
     # Ensure a fresh TenantManager singleton
-    from app.tenant_manager import reset_tenant_manager  # noqa: E402
+    from app.agents.tenant import reset_tenant_manager  # noqa: E402
     await reset_tenant_manager()
 
     # Reset the agent module-level singleton variable used by app.routers.chat
@@ -278,7 +275,7 @@ async def test_get_agent_for_user_from_own_tenant_manager(mock_openai_env):
     async def mock_goca_uid(uid, settings):
         return mock_agent
 
-    with patch("app.agent.get_tenant_manager") as mock_tm:
+    with patch("app.core.agent.get_tenant_manager") as mock_tm:
         mock_manager = MagicMock()
         mock_manager.get_or_create_agent = mock_goca_uid
         mock_tm.return_value = mock_manager
@@ -293,7 +290,7 @@ async def test_agent_reset_for_user_removes_tenant(mock_openai_env):
     """agent_reset_for_user removes the user's tenant from the cache."""
     _fresh_state()
 
-    from app.tenant_manager import TenantManager, get_tenant_manager
+    from app.agents.tenant import TenantManager, get_tenant_manager
     from app import agent as agent_mod  # noqa: E402
 
     # Create a fresh manager
@@ -303,14 +300,11 @@ async def test_agent_reset_for_user_removes_tenant(mock_openai_env):
     mock_settings = MagicMock()
     mock_settings.TENANT_PREFIX = "deepagent_"
 
-    with patch("app.tenant_manager.create_tenant_database", return_value=True), \
-         patch("app.tenant_manager.ensure_tenant_schema"), \
-         patch("app.tenant_manager.get_tenant_connection_string", return_value="postgresql:///x"), \
-         patch("app.tenant_manager.AsyncPostgresSaver") as MockSaver, \
-         patch("app.tenant_manager.AsyncPostgresStore") as MockStore, \
-         patch("app.tenant_manager.build_backend_for_tenant"), \
-         patch("app.tenant_manager._build_model", return_value=MagicMock()), \
-         patch("app.tenant_manager._build_agent", return_value=MagicMock()):
+    with patch("app.agents.tenant._create_tenant_db", return_value="postgresql:///x"), \
+         patch("app.agents.tenant.AsyncPostgresSaver") as MockSaver, \
+         patch("app.agents.tenant.AsyncPostgresStore") as MockStore, \
+         patch("app.agents.tenant.build_model", return_value=MagicMock()), \
+         patch("app.agents.tenant.create_deep_agent", return_value=MagicMock()):
 
         MockSaver.from_conn_string.return_value.__aenter__ = MagicMock()
         MockSaver.from_conn_string.return_value.__aexit__ = MagicMock()
@@ -336,21 +330,17 @@ async def test_agent_reset_for_user_does_not_affect_others(mock_openai_env):
     """Resetting user A's tenant does not affect user B."""
     _fresh_state()
 
-    from app.tenant_manager import TenantManager
-    from app import agent as agent_mod  # noqa: E402
+    from app.agents.tenant import TenantManager
 
     manager = TenantManager(ttl_seconds=3600, max_cache_size=100)
     mock_settings = MagicMock()
     mock_settings.TENANT_PREFIX = "deepagent_"
 
-    with patch("app.tenant_manager.create_tenant_database", return_value=True), \
-         patch("app.tenant_manager.ensure_tenant_schema"), \
-         patch("app.tenant_manager.get_tenant_connection_string", return_value="postgresql:///x"), \
-         patch("app.tenant_manager.AsyncPostgresSaver") as MockSaver, \
-         patch("app.tenant_manager.AsyncPostgresStore") as MockStore, \
-         patch("app.tenant_manager.build_backend_for_tenant"), \
-         patch("app.tenant_manager._build_model", return_value=MagicMock()), \
-         patch("app.tenant_manager._build_agent", side_effect=[MagicMock(), MagicMock()]):
+    with patch("app.agents.tenant._create_tenant_db", return_value="postgresql:///x"), \
+         patch("app.agents.tenant.AsyncPostgresSaver") as MockSaver, \
+         patch("app.agents.tenant.AsyncPostgresStore") as MockStore, \
+         patch("app.agents.tenant.build_model", return_value=MagicMock()), \
+         patch("app.agents.tenant.create_deep_agent", side_effect=[MagicMock(), MagicMock()]):
 
         MockSaver.from_conn_string.return_value.__aenter__ = MagicMock()
         MockSaver.from_conn_string.return_value.__aexit__ = MagicMock()
