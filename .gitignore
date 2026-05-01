@@ -1,3 +1,6 @@
 .env
 __pycache__
 .venv/
+PROJECT_STATE.md
+REQUIREMENTS.md
+.ruff_cache
